@@ -67,6 +67,103 @@ describe("InboxIQ API", () => {
     expect(empty.status).toBe(200);
     expect(empty.body).toEqual({});
   });
+
+  it("creates a lead with NEW status and allows multiple leads for one message", async () => {
+    const before = await prisma.lead.count();
+    const first = await request(app).post("/api/leads").send({
+      sourceMessageId: "message-perfect",
+      product: "Desk",
+      quantity: 30,
+      material: "Oak",
+      budget: 50000,
+      status: "CONTACTED",
+    });
+    const second = await request(app).post("/api/leads").send({
+      sourceMessageId: "message-perfect",
+      product: "Desk",
+      quantity: 10,
+      material: "",
+      budget: null,
+    });
+
+    expect(first.status).toBe(201);
+    expect(first.body).toEqual(
+      expect.objectContaining({
+        sourceMessageId: "message-perfect",
+        product: "Desk",
+        quantity: 30,
+        material: "Oak",
+        budget: 50000,
+        status: "NEW",
+        createdAt: expect.any(String),
+      }),
+    );
+    expect(second.status).toBe(201);
+    expect(second.body.material).toBeNull();
+    expect(second.body.status).toBe("NEW");
+    expect(await prisma.lead.count()).toBe(before + 2);
+  });
+
+  it("rejects invalid lead payloads without creating records", async () => {
+    const before = await prisma.lead.count();
+    const missingMessage = await request(app).post("/api/leads").send({
+      sourceMessageId: "missing-message",
+      product: "Desk",
+      quantity: 2,
+    });
+    const emptyProduct = await request(app).post("/api/leads").send({
+      sourceMessageId: "message-perfect",
+      product: "   ",
+      quantity: 2,
+    });
+    const badQuantity = await request(app).post("/api/leads").send({
+      sourceMessageId: "message-perfect",
+      product: "Desk",
+      quantity: 0,
+    });
+    const badBudget = await request(app).post("/api/leads").send({
+      sourceMessageId: "message-perfect",
+      product: "Desk",
+      quantity: 2,
+      budget: -1,
+    });
+
+    expect(missingMessage.status).toBe(400);
+    expect(emptyProduct.status).toBe(400);
+    expect(badQuantity.status).toBe(400);
+    expect(badBudget.status).toBe(400);
+    expect(await prisma.lead.count()).toBe(before);
+  });
+
+  it("updates lead status from NEW to CONTACTED only once", async () => {
+    const created = await request(app).post("/api/leads").send({
+      sourceMessageId: "message-partial",
+      product: "Chair",
+      quantity: 5,
+      material: "Black",
+      budget: 12000,
+    });
+
+    const updated = await request(app)
+      .patch(`/api/leads/${created.body.id}/status`)
+      .send({ status: "CONTACTED" });
+    const again = await request(app)
+      .patch(`/api/leads/${created.body.id}/status`)
+      .send({ status: "CONTACTED" });
+    const unknown = await request(app).patch("/api/leads/does-not-exist/status").send({ status: "CONTACTED" });
+    const invalid = await request(app)
+      .patch(`/api/leads/${created.body.id}/status`)
+      .send({ status: "NEW" });
+
+    expect(updated.status).toBe(200);
+    expect(updated.body.status).toBe("CONTACTED");
+    expect(again.status).toBe(409);
+    expect(unknown.status).toBe(404);
+    expect(invalid.status).toBe(400);
+
+    const persisted = await prisma.lead.findUnique({ where: { id: created.body.id } });
+    expect(persisted?.status).toBe("CONTACTED");
+  });
 });
 
 afterAll(async () => {
