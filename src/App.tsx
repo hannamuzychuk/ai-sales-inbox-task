@@ -1,11 +1,62 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
 import { api } from "./api";
-import type { Lead, Message } from "./types";
+import type { Extraction, Lead, LeadFormValues, Message } from "./types";
+import { emptyLeadForm } from "./types";
 
 const path = window.location.pathname.replace(/\/+$/, "") || "/inbox";
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
+}
+
+function isEmptyField(value: string) {
+  return value.trim() === "";
+}
+
+function mergeExtraction(current: LeadFormValues, extraction: Extraction): LeadFormValues {
+  return {
+    product: isEmptyField(current.product) && extraction.product != null && String(extraction.product).trim() !== ""
+      ? String(extraction.product)
+      : current.product,
+    quantity: isEmptyField(current.quantity) && extraction.quantity != null
+      ? String(extraction.quantity)
+      : current.quantity,
+    material: isEmptyField(current.material) && extraction.material != null && String(extraction.material).trim() !== ""
+      ? String(extraction.material)
+      : current.material,
+    budget: isEmptyField(current.budget) && extraction.budget != null
+      ? String(extraction.budget)
+      : current.budget,
+  };
+}
+
+function parseLeadPayload(messageId: string, form: LeadFormValues):
+  | { ok: true; payload: { sourceMessageId: string; product: string; quantity: number; material: string | null; budget: number | null } }
+  | { ok: false; error: string } {
+  const product = form.product.trim();
+  const quantity = Number(form.quantity);
+  const material = form.material.trim();
+  const budgetRaw = form.budget.trim();
+  const budget = budgetRaw === "" ? null : Number(budgetRaw);
+
+  if (!product) return { ok: false, error: "Product is required." };
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    return { ok: false, error: "Quantity must be a positive whole number." };
+  }
+  if (budgetRaw !== "" && (!Number.isFinite(budget) || (budget as number) < 0)) {
+    return { ok: false, error: "Budget must be a non-negative number." };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      sourceMessageId: messageId,
+      product,
+      quantity,
+      material: material === "" ? null : material,
+      budget,
+    },
+  };
 }
 
 function Layout({ children }: { children: ReactNode }) {
@@ -98,12 +149,135 @@ function DetailPage({ messageId }: { messageId: string }) {
           </dl>
           <div className="message-body">{message.body}</div>
         </article>
-        <aside className="panel placeholder-panel" aria-label="Lead extraction status">
-          <p className="eyebrow">Next step</p>
-          <p className="placeholder" role="status">Lead extraction not implemented yet.</p>
-        </aside>
+        <LeadExtractionPanel messageId={message.id} />
       </section>
     </main>
+  );
+}
+
+function LeadExtractionPanel({ messageId }: { messageId: string }) {
+  const formId = useId();
+  const [form, setForm] = useState<LeadFormValues>(emptyLeadForm);
+  const [extracting, setExtracting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  const busy = extracting || saving;
+
+  function updateField<K extends keyof LeadFormValues>(key: K, value: LeadFormValues[K]) {
+    setForm((current) => ({ ...current, [key]: value }));
+    setValidationError(null);
+    setSaveSuccess(false);
+  }
+
+  async function handleExtract() {
+    setExtracting(true);
+    setExtractError(null);
+    setValidationError(null);
+    setSaveSuccess(false);
+    try {
+      const extraction = await api.extract(messageId);
+      setForm((current) => mergeExtraction(current, extraction));
+    } catch {
+      setExtractError("Extraction failed. You can still fill the form manually.");
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaveSuccess(false);
+    const parsed = parseLeadPayload(messageId, form);
+    if (!parsed.ok) {
+      setValidationError(parsed.error);
+      return;
+    }
+
+    setSaving(true);
+    setValidationError(null);
+    try {
+      await api.createLead(parsed.payload);
+      setSaveSuccess(true);
+    } catch {
+      setValidationError("Could not save the lead. Check your input and try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <aside className="panel extraction-panel" aria-label="Lead extraction">
+      <p className="eyebrow">Next step</p>
+      <h2 className="extraction-title">Lead details</h2>
+      <p className="muted extraction-copy">Extract fields with AI, edit them, then save a lead to the pipeline.</p>
+
+      <div className="extraction-actions">
+        <button type="button" className="button button-secondary" onClick={handleExtract} disabled={busy}>
+          {extracting ? "Extracting…" : "Extract with AI"}
+        </button>
+      </div>
+
+      {extractError && <p className="alert" role="alert">{extractError}</p>}
+
+      <form className="lead-form" onSubmit={handleSave} noValidate>
+        <div className="field">
+          <label htmlFor={`${formId}-product`}>Product</label>
+          <input
+            id={`${formId}-product`}
+            name="product"
+            value={form.product}
+            onChange={(event) => updateField("product", event.target.value)}
+            disabled={busy}
+            autoComplete="off"
+          />
+        </div>
+        <div className="field">
+          <label htmlFor={`${formId}-quantity`}>Quantity</label>
+          <input
+            id={`${formId}-quantity`}
+            name="quantity"
+            inputMode="numeric"
+            value={form.quantity}
+            onChange={(event) => updateField("quantity", event.target.value)}
+            disabled={busy}
+            autoComplete="off"
+          />
+        </div>
+        <div className="field">
+          <label htmlFor={`${formId}-material`}>Material</label>
+          <input
+            id={`${formId}-material`}
+            name="material"
+            value={form.material}
+            onChange={(event) => updateField("material", event.target.value)}
+            disabled={busy}
+            autoComplete="off"
+          />
+        </div>
+        <div className="field">
+          <label htmlFor={`${formId}-budget`}>Budget</label>
+          <input
+            id={`${formId}-budget`}
+            name="budget"
+            inputMode="decimal"
+            value={form.budget}
+            onChange={(event) => updateField("budget", event.target.value)}
+            disabled={busy}
+            autoComplete="off"
+          />
+        </div>
+
+        {validationError && <p className="alert" role="alert">{validationError}</p>}
+        {saveSuccess && <p className="success" role="status">Lead saved. View it in the pipeline.</p>}
+
+        <button type="submit" className="button button-primary" disabled={busy}>
+          {saving ? "Saving…" : "Save lead"}
+        </button>
+      </form>
+    </aside>
   );
 }
 
@@ -119,6 +293,10 @@ function PipelinePage() {
     return () => { active = false; };
   }, []);
 
+  function handleLeadUpdated(updated: Lead) {
+    setLeads((current) => current.map((lead) => (lead.id === updated.id ? updated : lead)));
+  }
+
   return (
     <main className="page-container">
       <section className="page-heading"><div><p className="eyebrow">Revenue view</p><h1>Pipeline</h1><p className="muted">Saved leads will appear here.</p></div><div className="metric-card"><strong>{leads.length}</strong><span>leads</span></div></section>
@@ -126,14 +304,50 @@ function PipelinePage() {
         <div className="panel-heading"><h2 id="pipeline-heading">Leads</h2></div>
         {state === "loading" && <StateMessage>Loading pipeline…</StateMessage>}
         {state === "error" && <StateMessage>Could not load the pipeline.</StateMessage>}
-        {state === "ready" && (leads.length === 0 ? <p className="state-message">No leads yet.</p> : <ul className="lead-list">{leads.map((lead) => <LeadCard key={lead.id} lead={lead} />)}</ul>)}
+        {state === "ready" && (leads.length === 0 ? <p className="state-message">No leads yet.</p> : (
+          <ul className="lead-list">
+            {leads.map((lead) => (
+              <LeadCard key={lead.id} lead={lead} onUpdated={handleLeadUpdated} />
+            ))}
+          </ul>
+        ))}
       </section>
     </main>
   );
 }
 
-function LeadCard({ lead }: { lead: Lead }) {
-  return <li className="lead-card"><div><h3>{lead.product}</h3><p>{lead.quantity} unit{lead.quantity === 1 ? "" : "s"}{lead.material ? ` · ${lead.material}` : ""}</p><span className="muted">{lead.status} · {lead.budget === null ? "Budget unknown" : `${lead.budget}`}</span></div></li>;
+function LeadCard({ lead, onUpdated }: { lead: Lead; onUpdated: (lead: Lead) => void }) {
+  const [updating, setUpdating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleMarkContacted() {
+    setUpdating(true);
+    setError(null);
+    try {
+      const updated = await api.markLeadContacted(lead.id);
+      onUpdated(updated);
+    } catch {
+      setError("Could not update lead status.");
+    } finally {
+      setUpdating(false);
+    }
+  }
+
+  return (
+    <li className="lead-card">
+      <div className="lead-card-body">
+        <h3>{lead.product}</h3>
+        <p>{lead.quantity} unit{lead.quantity === 1 ? "" : "s"}{lead.material ? ` · ${lead.material}` : ""}</p>
+        <span className="muted">{lead.status} · {lead.budget === null ? "Budget unknown" : `${lead.budget}`}</span>
+        {error && <p className="alert" role="alert">{error}</p>}
+      </div>
+      {lead.status === "NEW" && (
+        <button type="button" className="button button-secondary" onClick={handleMarkContacted} disabled={updating}>
+          {updating ? "Updating…" : "Mark as contacted"}
+        </button>
+      )}
+    </li>
+  );
 }
 
 export function App() {
